@@ -1,0 +1,118 @@
+.comp-container {
+    width: 100%;
+    font-family: Arial, sans-serif;
+    color: #17324d;
+}
+
+.comp-card {
+    width: 100%;
+    margin-bottom: 16px;
+    background: #fff;
+    border: 1px solid #e2e2e2;
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.comp-title {
+    padding: 13px 15px;
+    border-bottom: 1px solid #e5e5e5;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.comp-body {
+    padding: 12px 15px 14px;
+}
+
+.comp-row {
+    display: grid;
+    grid-template-columns: 16% 40% 16% 28%;
+    align-items: start;
+    border-bottom: 1px solid #ededed;
+}
+
+.comp-label,
+.comp-value {
+    padding: 7px;
+    font-size: 12px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
+.comp-label {
+    color: rgb(0, 0, 0);
+    font-weight: 500;
+}
+
+.comp-value {
+    color: #173b69;
+}
+
+.comp-badge {
+    display: inline-block;
+    padding: 4px 9px;
+    border-radius: 14px;
+    font-size: 10px;
+    font-weight: bold;
+    white-space: nowrap;
+}
+
+.badge-progress {
+    background: #ffbd20;
+    color: #222;
+}
+
+.badge-overdue,
+.badge-danger {
+    background: #d91508;
+    color: #fff;
+}
+
+.badge-closed {
+    background: #16834a;
+    color: #fff;
+}
+
+.badge-resolved {
+    background: #2478bd;
+    color: #fff;
+}
+
+.badge-warning {
+    background: #f0a52b;
+    color: #222;
+}
+
+.badge-default {
+    background: #687789;
+    color: #fff;
+}
+
+.comp-description {
+    display: grid;
+    grid-template-columns: 16% 84%;
+    border-bottom: 1px solid #ededed;
+}
+
+.comp-desc-value {
+    padding: 7px;
+    font-size: 12px;
+    color: #173b69;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.comp-empty {
+    padding: 18px;
+    color: #666;
+}
+
+@media (max-width: 600px) {
+    .comp-row {
+        grid-template-columns: 35% 65%;
+    }
+
+    .comp-description {
+        grid-template-columns: 35% 65%;
+    }
+}

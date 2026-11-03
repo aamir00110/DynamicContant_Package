@@ -1,0 +1,356 @@
+create or replace PACKAGE BODY PKG_COMP_INFO AS
+    FUNCTION GET_COMPLAINT_CARD ( P_COMPLAINT_NO IN VARCHAR2 DEFAULT NULL
+    ) 
+    RETURN CLOB
+    IS
+        L_HTML       CLOB;
+        L_COUNT      PLS_INTEGER := 0;
+        L_STATUS     VARCHAR2(100);
+        L_STATUS_CSS VARCHAR2(30);
+        L_OVERDUE    BOOLEAN;
+        L_NOW        DATE := SYSDATE;
+
+        FUNCTION H(P_VALUE IN VARCHAR2)
+            RETURN VARCHAR2
+        IS
+        BEGIN
+            RETURN APEX_ESCAPE.HTML(NVL(P_VALUE, '-'));
+        END H;
+
+        FUNCTION FMT_DT(P_VALUE IN DATE)
+            RETURN VARCHAR2
+        IS
+        BEGIN
+            IF P_VALUE IS NULL THEN
+                RETURN '-';
+            END IF;
+
+            RETURN TO_CHAR(P_VALUE, 'DD-MON-YYYY HH24:MI');
+        END FMT_DT;
+
+        FUNCTION FMT_MIN(P_VALUE IN NUMBER)
+            RETURN VARCHAR2
+        IS
+        BEGIN
+            IF P_VALUE IS NULL THEN
+                RETURN '-';
+            END IF;
+
+            RETURN TO_CHAR(ROUND(P_VALUE)) || ' min';
+        END FMT_MIN;
+
+        FUNCTION BADGE(
+            P_TEXT  IN VARCHAR2,
+            P_CLASS IN VARCHAR2
+        ) RETURN VARCHAR2
+        IS
+        BEGIN
+            RETURN '<span class="comp-badge ' ||
+                   P_CLASS || '">' || H(P_TEXT) ||
+                   '</span>';
+        END BADGE;
+
+        PROCEDURE ADD_ROW(
+            P_LABEL1 IN VARCHAR2,
+            P_VALUE1 IN VARCHAR2,
+            P_LABEL2 IN VARCHAR2,
+            P_VALUE2 IN VARCHAR2
+        )
+        IS
+        BEGIN
+            L_HTML := L_HTML ||
+                '<div class="comp-row">' ||
+                '<div class="comp-label">' ||
+                H(P_LABEL1) || '</div>' ||
+                '<div class="comp-value">' ||
+                H(P_VALUE1) || '</div>' ||
+                '<div class="comp-label">' ||
+                H(P_LABEL2) || '</div>' ||
+                '<div class="comp-value">' ||
+                H(P_VALUE2) || '</div>' ||
+                '</div>';
+        END ADD_ROW;
+
+    BEGIN
+        L_HTML :=
+            '<div class="comp-container">';
+
+        FOR C IN (
+            SELECT
+                H.COMPLAINT_ID,
+                H.COMPLAINT_NO,
+                H.COMPLAINT_DATE,
+                H.REPORTED_BY,
+                (SELECT EH.HALL_NAME
+                FROM EM_HALLS EH
+                WHERE  EH.HALL_ID=H.DEPARTMENT_ID) AS DEPARTMENT_ID,
+                -- H.LINE_ID,
+                (SELECT L.LINE_NAME
+                            FROM EM_LINES L
+                            WHERE L.LINE_ID=H.LINE_ID) AS LINE_ID,
+                -- (SELECT EM.MACHINE_NAME
+                -- FROM  EM_MACHINES EM
+                -- WHERE EM.MACHINE_ID=H.MACHINE_ID) AS MACHINE_ID,
+                EM.MACHINE_NAME || ' MODEL# ' || EM.MODEL_NO || ' SR# ' || EM.SERIAL_NO  || ' ' || EL.LINE_NAME AS MACHINE_ID,
+                H.LOCATION_ID,
+                -- H.FAULT_ID,
+                (SELECT EMF.FAULT_NAME 
+                FROM EM_MACHINE_FAULTS EMF
+                WHERE EMF.MACHINE_FAULT_ID = H.FAULT_ID) AS FAULT_ID,
+                -- H.PRIORITY_ID,
+                CASE
+                WHEN H.PRIORITY_ID = 1 THEN 'Critical - Line Stopped'
+                WHEN H.PRIORITY_ID = 2 THEN 'High'
+                WHEN H.PRIORITY_ID = 3 THEN 'Medium'
+                ELSE 'Low'  END AS PRIORITY_ID,   
+                H.FAULT_DESCRIPTION,
+                H.PRODUCTION_IMPACT,
+                H.MACHINE_STOPPED,
+                H.STATUS_CODE,
+                H.REPORTED_DATE_TIME,
+                H.ACKNOWLEDGED_DATE_TIME,
+                H.RESOLVED_DATE_TIME,
+                H.CLOSED_DATE_TIME,
+                H.DOWNTIME_MINUTES,
+                H.REOPEN_COUNT,
+                H.REJECTION_REASON,
+                -- h.REASON,
+                -- CASE 
+                -- WHEN H.REASON = 1 THEN 'CHANGE PARTS'
+                -- ELSE 'NO CHANGE' END AS REASON,
+                H.CHANGE_PARTS_NAME,
+                H.EXCEPTIONAL_CLOSURE,
+                H.REMARKS,
+                H.CREATED_BY,
+                H.CREATED_DATE,
+                H.UPDATED_BY,
+                H.UPDATED_DATE
+             FROM MS_COMPLAINT_H H
+            LEFT JOIN EM_MACHINES EM  ON EM.MACHINE_ID = H.MACHINE_ID
+            LEFT JOIN EM_LINES EL     ON EL.LINE_ID = EM.LINE_ID
+            WHERE P_COMPLAINT_NO IS NULL
+               OR UPPER(COMPLAINT_NO) =
+                  UPPER(TRIM(P_COMPLAINT_NO))
+            ORDER BY H.COMPLAINT_DATE DESC NULLS LAST,
+                     H.COMPLAINT_ID DESC
+        )
+        LOOP
+            L_COUNT := L_COUNT + 1;
+
+            L_STATUS := UPPER(
+                NVL(C.STATUS_CODE, 'UNKNOWN')
+            );
+
+            L_STATUS_CSS :=
+                CASE
+                    WHEN L_STATUS IN ('IN_PROGRESS', 'IN PROGRESS')
+                        THEN 'badge-progress'
+                    WHEN L_STATUS IN ('ACKNOWLEDGED')
+                        THEN 'badge-progress'
+                    WHEN L_STATUS = 'CLOSED'
+                        THEN 'badge-closed'
+                    WHEN L_STATUS = 'RESOLVED'
+                        THEN 'badge-resolved'
+                    WHEN L_STATUS IN ('REJECTED', 'CANCELLED')
+                        THEN 'badge-danger'
+                    ELSE 'badge-default'
+                END;
+
+            -- Overdue rule: unresolved complaint older than 24 hours.
+            -- Change 24 if your maintenance SLA is different.
+            
+            L_OVERDUE :=
+                C.REPORTED_DATE_TIME IS NOT NULL
+                AND C.REPORTED_DATE_TIME < L_NOW - 1
+                AND C.RESOLVED_DATE_TIME IS NULL
+                AND C.CLOSED_DATE_TIME IS NULL
+                AND L_STATUS NOT IN (
+                    'RESOLVED', 'CLOSED', 'CANCELLED', 'REJECTED'
+                );
+
+            L_HTML := L_HTML ||
+                '<section class="comp-card">' ||
+                '<div class="comp-title">Complaint</div>' ||
+                '<div class="comp-body">';
+
+            -- Complaint number and status badges
+            L_HTML := L_HTML ||
+                '<div class="comp-row">' ||
+                '<div class="comp-label">Complaint No</div>' ||
+                '<div class="comp-value">' ||
+                H(C.COMPLAINT_NO) ||
+                '</div>' ||
+
+                '<div class="comp-label">Status</div>' ||
+                '<div class="comp-value">' ||
+                BADGE(L_STATUS, L_STATUS_CSS);
+
+            IF L_OVERDUE THEN
+                L_HTML := L_HTML ||
+                    ' ' || BADGE('OVERDUE', 'badge-overdue');
+            END IF;
+
+            IF NVL(C.REOPEN_COUNT, 0) > 0 THEN
+                L_HTML := L_HTML ||
+                    ' ' || BADGE(
+                        'Reopened x' || TO_CHAR(C.REOPEN_COUNT),
+                        'badge-warning'
+                    );
+            END IF;
+
+            IF C.EXCEPTIONAL_CLOSURE = 'Y' THEN
+                L_HTML := L_HTML ||
+                    ' ' || BADGE(
+                        'Exceptional Closure',
+                        'badge-warning'
+                    );
+            END IF;
+
+            L_HTML := L_HTML || '</div></div>';
+
+            ADD_ROW(
+                'Department',
+                TO_CHAR(C.DEPARTMENT_ID),
+                'Production Line',
+                TO_CHAR(C.LINE_ID)
+            );
+----------------------------
+             ADD_ROW('Machine'              , TO_CHAR(C.MACHINE_ID),           
+                     'Change Parts Name'    , TO_CHAR(C.CHANGE_PARTS_NAME) );
+---------------------------------
+
+
+            ADD_ROW(
+                'Fault',
+                TO_CHAR(C.FAULT_ID),
+                'Priority',
+                TO_CHAR(C.PRIORITY_ID)
+            );
+
+            ADD_ROW(
+                'Production Impact',
+                REPLACE(C.PRODUCTION_IMPACT, '_', ' '),
+                'Machine Stopped',
+                CASE C.MACHINE_STOPPED
+                    WHEN 'Y' THEN 'Yes'
+                    WHEN 'N' THEN 'No'
+                    ELSE '-'
+                END
+            );
+
+            ADD_ROW(    'Submitted',  FMT_DT(C.REPORTED_DATE_TIME),
+                        'Reported By',  C.REPORTED_BY
+                        
+            );
+
+            ADD_ROW(
+                'Acknowledged',
+                FMT_DT(C.ACKNOWLEDGED_DATE_TIME),
+                'Response Time',
+                CASE
+                    WHEN C.REPORTED_DATE_TIME IS NOT NULL
+                     AND C.ACKNOWLEDGED_DATE_TIME IS NOT NULL
+                    THEN FMT_MIN(
+                        (C.ACKNOWLEDGED_DATE_TIME -
+                         C.REPORTED_DATE_TIME) * 1440
+                    )
+                    ELSE '-'
+                END
+            );
+
+            ADD_ROW(
+                'Start Working',
+                FMT_DT(C.RESOLVED_DATE_TIME),
+                'Resolution Time',
+                CASE
+                    WHEN C.REPORTED_DATE_TIME IS NOT NULL
+                     AND C.RESOLVED_DATE_TIME IS NOT NULL
+                    THEN FMT_MIN(
+                        (C.RESOLVED_DATE_TIME -
+                         C.REPORTED_DATE_TIME) * 1440
+                    )
+                    ELSE '-'
+                END
+            );
+
+            ADD_ROW(
+                'Closed',
+                FMT_DT(C.CLOSED_DATE_TIME),
+                'Downtime',
+                CASE
+                    WHEN C.DOWNTIME_MINUTES IS NOT NULL
+                    THEN FMT_MIN(C.DOWNTIME_MINUTES)
+                    WHEN C.REPORTED_DATE_TIME IS NOT NULL
+                     AND C.CLOSED_DATE_TIME IS NULL
+                    THEN FMT_MIN(
+                        (L_NOW - C.REPORTED_DATE_TIME) * 1440
+                    )
+                    ELSE '-'
+                END
+            );
+
+            ADD_ROW(
+                'Complaint Date',
+                FMT_DT(C.COMPLAINT_DATE),
+                'Complaint ID',
+                TO_CHAR(C.COMPLAINT_ID)
+            );
+
+              ADD_ROW(
+                'Fault Description',
+                C.FAULT_DESCRIPTION,
+                'Remarks',
+                C.REMARKS
+            );
+
+            -- L_HTML := L_HTML ||
+            --     '<div class="comp-description">' ||
+            --     '<div class="comp-label">Fault Description</div>' ||
+            --     '<div class="comp-desc-value">' ||
+            --     H(C.FAULT_DESCRIPTION) ||
+            --     '</div></div>';
+
+            IF C.REJECTION_REASON IS NOT NULL THEN
+                L_HTML := L_HTML ||
+                    '<div class="comp-description">' ||
+                    '<div class="comp-label">Rejection Reason</div>' ||
+                    '<div class="comp-desc-value">' ||
+                    H(C.REJECTION_REASON) ||
+                    '</div></div>';
+            END IF;
+
+            ADD_ROW(
+                'Created By',
+                C.CREATED_BY,
+                'Created Date',
+                FMT_DT(C.CREATED_DATE)
+            );
+
+            ADD_ROW(
+                'Updated By',
+                C.UPDATED_BY,
+                'Updated Date',
+                FMT_DT(C.UPDATED_DATE)
+            );
+
+            L_HTML := L_HTML ||
+                '</div></section>';
+        END LOOP;
+
+        IF L_COUNT = 0 THEN
+            L_HTML := L_HTML ||
+                '<div class="comp-card">' ||
+                '<div class="comp-title">Complaint</div>' ||
+                '<div class="comp-empty">' ||
+                'No complaint found.' ||
+                '</div></div>';
+        END IF;
+
+        L_HTML := L_HTML || '</div>';
+
+        RETURN L_HTML;
+
+    END GET_COMPLAINT_CARD;
+
+END PKG_COMP_INFO;
+/

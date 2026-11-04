@@ -1,79 +1,125 @@
+create or replace PACKAGE PKG_COMP_INFO AS
+    FUNCTION GET_COMPLAINT_CARD ( P_COMPLAINT_ID IN VARCHAR2 DEFAULT NULL )
+    RETURN CLOB;
+END PKG_COMP_INFO;
+/
+
 create or replace PACKAGE BODY PKG_COMP_INFO AS
-    FUNCTION GET_COMPLAINT_CARD ( P_COMPLAINT_NO IN VARCHAR2 DEFAULT NULL
-    ) 
+
+    FUNCTION GET_COMPLAINT_CARD (
+        P_COMPLAINT_ID IN VARCHAR2 DEFAULT NULL
+    )
     RETURN CLOB
     IS
-        L_HTML       CLOB;
-        L_COUNT      PLS_INTEGER := 0;
-        L_STATUS     VARCHAR2(100);
-        L_STATUS_CSS VARCHAR2(30);
-        L_OVERDUE    BOOLEAN;
-        L_NOW        DATE := SYSDATE;
+        L_HTML        CLOB;
+        L_COUNT       PLS_INTEGER := 0;
+        L_STATUS      VARCHAR2(100);
+        L_STATUS_CSS  VARCHAR2(30);
+        L_PRIO_CSS    VARCHAR2(30);
+        L_OVERDUE     BOOLEAN;
+        L_NOW         DATE := SYSDATE;
+        L_RESPONSE    VARCHAR2(50);
+        L_RESOLUTION  VARCHAR2(50);
+        L_DOWNTIME    VARCHAR2(50);
+        L_PART_NO     PLS_INTEGER;
 
-        FUNCTION H(P_VALUE IN VARCHAR2)
-            RETURN VARCHAR2
-        IS
+        ---------------------------------------------------------------
+        -- Helpers
+        ---------------------------------------------------------------
+        FUNCTION ESC (P_VALUE IN VARCHAR2) RETURN VARCHAR2 IS
         BEGIN
             RETURN APEX_ESCAPE.HTML(NVL(P_VALUE, '-'));
-        END H;
+        END ESC;
 
-        FUNCTION FMT_DT(P_VALUE IN DATE)
-            RETURN VARCHAR2
-        IS
+        -- escaped + keeps line breaks (for long text)
+        FUNCTION ESC_BR (P_VALUE IN VARCHAR2) RETURN VARCHAR2 IS
+        BEGIN
+            RETURN REPLACE(
+                       REPLACE(APEX_ESCAPE.HTML(NVL(P_VALUE, '-')), CHR(13), ''),
+                       CHR(10), '<br>');
+        END ESC_BR;
+
+        FUNCTION FMT_DT (P_VALUE IN DATE) RETURN VARCHAR2 IS
         BEGIN
             IF P_VALUE IS NULL THEN
                 RETURN '-';
             END IF;
-
             RETURN TO_CHAR(P_VALUE, 'DD-MON-YYYY HH24:MI');
         END FMT_DT;
 
-        FUNCTION FMT_MIN(P_VALUE IN NUMBER)
-            RETURN VARCHAR2
-        IS
+        FUNCTION FMT_NUM (P_VALUE IN NUMBER) RETURN VARCHAR2 IS
         BEGIN
             IF P_VALUE IS NULL THEN
                 RETURN '-';
             END IF;
+            RETURN TO_CHAR(P_VALUE, 'FM999G999G990D00');
+        END FMT_NUM;
 
-            RETURN TO_CHAR(ROUND(P_VALUE)) || ' min';
+        FUNCTION FMT_MIN (P_VALUE IN NUMBER) RETURN VARCHAR2 IS
+            L_M NUMBER;
+        BEGIN
+            IF P_VALUE IS NULL THEN
+                RETURN '-';
+            END IF;
+            L_M := ROUND(P_VALUE);
+            IF L_M >= 60 THEN
+                RETURN TO_CHAR(TRUNC(L_M / 60)) || ' h ' || TO_CHAR(MOD(L_M, 60)) || ' min';
+            END IF;
+            RETURN TO_CHAR(L_M) || ' min';
         END FMT_MIN;
 
-        FUNCTION BADGE(
-            P_TEXT  IN VARCHAR2,
-            P_CLASS IN VARCHAR2
-        ) RETURN VARCHAR2
-        IS
+        FUNCTION BADGE (P_TEXT IN VARCHAR2, P_CLASS IN VARCHAR2) RETURN VARCHAR2 IS
         BEGIN
-            RETURN '<span class="comp-badge ' ||
-                   P_CLASS || '">' || H(P_TEXT) ||
-                   '</span>';
+            RETURN '<span class="comp-badge ' || P_CLASS || '">' || ESC(P_TEXT) || '</span>';
         END BADGE;
 
-        PROCEDURE ADD_ROW(
-            P_LABEL1 IN VARCHAR2,
-            P_VALUE1 IN VARCHAR2,
-            P_LABEL2 IN VARCHAR2,
-            P_VALUE2 IN VARCHAR2
-        )
-        IS
+        -- single label/value field
+        FUNCTION FIELD (
+            P_LABEL IN VARCHAR2,
+            P_VALUE IN VARCHAR2,
+            P_CLASS IN VARCHAR2 DEFAULT NULL
+        ) RETURN VARCHAR2 IS
         BEGIN
-            L_HTML := L_HTML ||
-                '<div class="comp-row">' ||
-                '<div class="comp-label">' ||
-                H(P_LABEL1) || '</div>' ||
-                '<div class="comp-value">' ||
-                H(P_VALUE1) || '</div>' ||
-                '<div class="comp-label">' ||
-                H(P_LABEL2) || '</div>' ||
-                '<div class="comp-value">' ||
-                H(P_VALUE2) || '</div>' ||
-                '</div>';
-        END ADD_ROW;
+            RETURN '<div class="comp-field ' || P_CLASS || '">' ||
+                   '<span class="comp-label">' || ESC(P_LABEL) || '</span>' ||
+                   '<span class="comp-value">' || ESC(P_VALUE) || '</span>' ||
+                   '</div>';
+        END FIELD;
+
+        -- KPI tile
+        FUNCTION TILE (
+            P_LABEL IN VARCHAR2,
+            P_VALUE IN VARCHAR2,
+            P_CLASS IN VARCHAR2 DEFAULT NULL
+        ) RETURN VARCHAR2 IS
+        BEGIN
+            RETURN '<div class="comp-tile ' || P_CLASS || '">' ||
+                   '<span class="comp-tile-value">' || ESC(P_VALUE) || '</span>' ||
+                   '<span class="comp-tile-label">' || ESC(P_LABEL) || '</span>' ||
+                   '</div>';
+        END TILE;
+
+        -- timeline step
+        FUNCTION STEP (
+            P_LABEL IN VARCHAR2,
+            P_DATE  IN DATE
+        ) RETURN VARCHAR2 IS
+        BEGIN
+            RETURN '<div class="comp-step ' ||
+                   CASE WHEN P_DATE IS NOT NULL THEN 'is-done' ELSE 'is-pending' END || '">' ||
+                   '<span class="comp-step-dot"></span>' ||
+                   '<span class="comp-step-label">' || ESC(P_LABEL) || '</span>' ||
+                   '<span class="comp-step-date">' || ESC(FMT_DT(P_DATE)) || '</span>' ||
+                   '</div>';
+        END STEP;
+
+        PROCEDURE PUT (P_TEXT IN VARCHAR2) IS
+        BEGIN
+            L_HTML := L_HTML || P_TEXT;
+        END PUT;
 
     BEGIN
-        L_HTML :=
-            '<div class="comp-container">';
+        L_HTML := '<div class="comp-container">';
 
         FOR C IN (
             SELECT
@@ -82,27 +128,23 @@ create or replace PACKAGE BODY PKG_COMP_INFO AS
                 H.COMPLAINT_DATE,
                 H.REPORTED_BY,
                 (SELECT EH.HALL_NAME
-                FROM EM_HALLS EH
-                WHERE  EH.HALL_ID=H.DEPARTMENT_ID) AS DEPARTMENT_ID,
-                -- H.LINE_ID,
+                   FROM EM_HALLS EH
+                  WHERE EH.HALL_ID = H.DEPARTMENT_ID) AS DEPARTMENT_NAME,
                 (SELECT L.LINE_NAME
-                            FROM EM_LINES L
-                            WHERE L.LINE_ID=H.LINE_ID) AS LINE_ID,
-                -- (SELECT EM.MACHINE_NAME
-                -- FROM  EM_MACHINES EM
-                -- WHERE EM.MACHINE_ID=H.MACHINE_ID) AS MACHINE_ID,
-                EM.MACHINE_NAME || ' MODEL# ' || EM.MODEL_NO || ' SR# ' || EM.SERIAL_NO  || ' ' || EL.LINE_NAME AS MACHINE_ID,
+                   FROM EM_LINES L
+                  WHERE L.LINE_ID = H.LINE_ID) AS LINE_NAME,
+                EM.MACHINE_NAME || ' MODEL# ' || EM.MODEL_NO || ' SR# ' || EM.SERIAL_NO || ' ' || EL.LINE_NAME AS MACHINE_NAME,
                 H.LOCATION_ID,
-                -- H.FAULT_ID,
-                (SELECT EMF.FAULT_NAME 
-                FROM EM_MACHINE_FAULTS EMF
-                WHERE EMF.MACHINE_FAULT_ID = H.FAULT_ID) AS FAULT_ID,
-                -- H.PRIORITY_ID,
+                (SELECT EMF.FAULT_NAME
+                   FROM EM_MACHINE_FAULTS EMF
+                  WHERE EMF.MACHINE_FAULT_ID = H.FAULT_ID) AS FAULT_NAME,
+                H.PRIORITY_ID AS PRIORITY_NO,
                 CASE
-                WHEN H.PRIORITY_ID = 1 THEN 'Critical - Line Stopped'
-                WHEN H.PRIORITY_ID = 2 THEN 'High'
-                WHEN H.PRIORITY_ID = 3 THEN 'Medium'
-                ELSE 'Low'  END AS PRIORITY_ID,   
+                    WHEN H.PRIORITY_ID = 1 THEN 'Critical - Line Stopped'
+                    WHEN H.PRIORITY_ID = 2 THEN 'High'
+                    WHEN H.PRIORITY_ID = 3 THEN 'Medium'
+                    ELSE 'Low'
+                END AS PRIORITY_NAME,
                 H.FAULT_DESCRIPTION,
                 H.PRODUCTION_IMPACT,
                 H.MACHINE_STOPPED,
@@ -114,242 +156,246 @@ create or replace PACKAGE BODY PKG_COMP_INFO AS
                 H.DOWNTIME_MINUTES,
                 H.REOPEN_COUNT,
                 H.REJECTION_REASON,
-                -- h.REASON,
-                -- CASE 
-                -- WHEN H.REASON = 1 THEN 'CHANGE PARTS'
-                -- ELSE 'NO CHANGE' END AS REASON,
-                H.CHANGE_PARTS_NAME,
                 H.EXCEPTIONAL_CLOSURE,
+                -- total of all change parts for this complaint
+                (SELECT SUM(NVL(MP.CHANGE_PARTS_QTY, 0) * NVL(MP.CHANGE_PARTS_PRICE, 0))
+                   FROM MS_CHANGE_PART MP
+                  WHERE MP.COMPLAINT_ID = H.COMPLAINT_ID) AS TOTAL_COSTING,
+                (SELECT COUNT(*)
+                   FROM MS_CHANGE_PART MP
+                  WHERE MP.COMPLAINT_ID = H.COMPLAINT_ID) AS PARTS_COUNT,
                 H.REMARKS,
                 H.CREATED_BY,
                 H.CREATED_DATE,
                 H.UPDATED_BY,
                 H.UPDATED_DATE
-             FROM MS_COMPLAINT_H H
-            LEFT JOIN EM_MACHINES EM  ON EM.MACHINE_ID = H.MACHINE_ID
-            LEFT JOIN EM_LINES EL     ON EL.LINE_ID = EM.LINE_ID
-            WHERE P_COMPLAINT_NO IS NULL
-               OR UPPER(COMPLAINT_NO) =
-                  UPPER(TRIM(P_COMPLAINT_NO))
-            ORDER BY H.COMPLAINT_DATE DESC NULLS LAST,
-                     H.COMPLAINT_ID DESC
+              FROM MS_COMPLAINT_H H
+              LEFT JOIN EM_MACHINES EM      ON EM.MACHINE_ID      = H.MACHINE_ID
+              LEFT JOIN EM_LINES    EL      ON EL.LINE_ID         = EM.LINE_ID
+             WHERE P_COMPLAINT_ID IS NULL
+                OR TO_CHAR(H.COMPLAINT_ID) = TRIM(P_COMPLAINT_ID)
+             ORDER BY H.COMPLAINT_DATE DESC NULLS LAST,
+                      H.COMPLAINT_ID DESC
         )
         LOOP
-            L_COUNT := L_COUNT + 1;
-
-            L_STATUS := UPPER(
-                NVL(C.STATUS_CODE, 'UNKNOWN')
-            );
+            L_COUNT  := L_COUNT + 1;
+            L_STATUS := UPPER(NVL(C.STATUS_CODE, 'UNKNOWN'));
 
             L_STATUS_CSS :=
                 CASE
-                    WHEN L_STATUS IN ('IN_PROGRESS', 'IN PROGRESS')
+                    WHEN L_STATUS IN ('IN_PROGRESS', 'IN PROGRESS', 'ACKNOWLEDGED')
                         THEN 'badge-progress'
-                    WHEN L_STATUS IN ('ACKNOWLEDGED')
-                        THEN 'badge-progress'
-                    WHEN L_STATUS = 'CLOSED'
-                        THEN 'badge-closed'
-                    WHEN L_STATUS = 'RESOLVED'
-                        THEN 'badge-resolved'
-                    WHEN L_STATUS IN ('REJECTED', 'CANCELLED')
-                        THEN 'badge-danger'
+                    WHEN L_STATUS = 'CLOSED'   THEN 'badge-closed'
+                    WHEN L_STATUS = 'RESOLVED' THEN 'badge-resolved'
+                    WHEN L_STATUS IN ('REJECTED', 'CANCELLED') THEN 'badge-danger'
                     ELSE 'badge-default'
                 END;
 
-            -- Overdue rule: unresolved complaint older than 24 hours.
-            -- Change 24 if your maintenance SLA is different.
-            
+            L_PRIO_CSS :=
+                CASE C.PRIORITY_NO
+                    WHEN 1 THEN 'prio-critical'
+                    WHEN 2 THEN 'prio-high'
+                    WHEN 3 THEN 'prio-medium'
+                    ELSE 'prio-low'
+                END;
+
+            -- Overdue: unresolved complaint older than 24 hours
             L_OVERDUE :=
-                C.REPORTED_DATE_TIME IS NOT NULL
+                    C.REPORTED_DATE_TIME IS NOT NULL
                 AND C.REPORTED_DATE_TIME < L_NOW - 1
                 AND C.RESOLVED_DATE_TIME IS NULL
-                AND C.CLOSED_DATE_TIME IS NULL
-                AND L_STATUS NOT IN (
-                    'RESOLVED', 'CLOSED', 'CANCELLED', 'REJECTED'
-                );
+                AND C.CLOSED_DATE_TIME   IS NULL
+                AND L_STATUS NOT IN ('RESOLVED', 'CLOSED', 'CANCELLED', 'REJECTED');
 
-            L_HTML := L_HTML ||
-                '<section class="comp-card">' ||
-                '<div class="comp-title">Complaint</div>' ||
-                '<div class="comp-body">';
-
-            -- Complaint number and status badges
-            L_HTML := L_HTML ||
-                '<div class="comp-row">' ||
-                '<div class="comp-label">Complaint No</div>' ||
-                '<div class="comp-value">' ||
-                H(C.COMPLAINT_NO) ||
-                '</div>' ||
-
-                '<div class="comp-label">Status</div>' ||
-                '<div class="comp-value">' ||
-                BADGE(L_STATUS, L_STATUS_CSS);
-
-            IF L_OVERDUE THEN
-                L_HTML := L_HTML ||
-                    ' ' || BADGE('OVERDUE', 'badge-overdue');
-            END IF;
-
-            IF NVL(C.REOPEN_COUNT, 0) > 0 THEN
-                L_HTML := L_HTML ||
-                    ' ' || BADGE(
-                        'Reopened x' || TO_CHAR(C.REOPEN_COUNT),
-                        'badge-warning'
-                    );
-            END IF;
-
-            IF C.EXCEPTIONAL_CLOSURE = 'Y' THEN
-                L_HTML := L_HTML ||
-                    ' ' || BADGE(
-                        'Exceptional Closure',
-                        'badge-warning'
-                    );
-            END IF;
-
-            L_HTML := L_HTML || '</div></div>';
-
-            ADD_ROW(
-                'Department',
-                TO_CHAR(C.DEPARTMENT_ID),
-                'Production Line',
-                TO_CHAR(C.LINE_ID)
-            );
-----------------------------
-             ADD_ROW('Machine'              , TO_CHAR(C.MACHINE_ID),           
-                     'Change Parts Name'    , TO_CHAR(C.CHANGE_PARTS_NAME) );
----------------------------------
-
-
-            ADD_ROW(
-                'Fault',
-                TO_CHAR(C.FAULT_ID),
-                'Priority',
-                TO_CHAR(C.PRIORITY_ID)
-            );
-
-            ADD_ROW(
-                'Production Impact',
-                REPLACE(C.PRODUCTION_IMPACT, '_', ' '),
-                'Machine Stopped',
-                CASE C.MACHINE_STOPPED
-                    WHEN 'Y' THEN 'Yes'
-                    WHEN 'N' THEN 'No'
-                    ELSE '-'
-                END
-            );
-
-            ADD_ROW(    'Submitted',  FMT_DT(C.REPORTED_DATE_TIME),
-                        'Reported By',  C.REPORTED_BY
-                        
-            );
-
-            ADD_ROW(
-                'Acknowledged',
-                FMT_DT(C.ACKNOWLEDGED_DATE_TIME),
-                'Response Time',
+            -- KPI values
+            L_RESPONSE :=
                 CASE
                     WHEN C.REPORTED_DATE_TIME IS NOT NULL
                      AND C.ACKNOWLEDGED_DATE_TIME IS NOT NULL
-                    THEN FMT_MIN(
-                        (C.ACKNOWLEDGED_DATE_TIME -
-                         C.REPORTED_DATE_TIME) * 1440
-                    )
+                    THEN FMT_MIN((C.ACKNOWLEDGED_DATE_TIME - C.REPORTED_DATE_TIME) * 1440)
                     ELSE '-'
-                END
-            );
+                END;
 
-            ADD_ROW(
-                'Start Working',
-                FMT_DT(C.RESOLVED_DATE_TIME),
-                'Resolution Time',
+            L_RESOLUTION :=
                 CASE
                     WHEN C.REPORTED_DATE_TIME IS NOT NULL
                      AND C.RESOLVED_DATE_TIME IS NOT NULL
-                    THEN FMT_MIN(
-                        (C.RESOLVED_DATE_TIME -
-                         C.REPORTED_DATE_TIME) * 1440
-                    )
+                    THEN FMT_MIN((C.RESOLVED_DATE_TIME - C.REPORTED_DATE_TIME) * 1440)
                     ELSE '-'
-                END
-            );
+                END;
 
-            ADD_ROW(
-                'Closed',
-                FMT_DT(C.CLOSED_DATE_TIME),
-                'Downtime',
+            L_DOWNTIME :=
                 CASE
                     WHEN C.DOWNTIME_MINUTES IS NOT NULL
                     THEN FMT_MIN(C.DOWNTIME_MINUTES)
                     WHEN C.REPORTED_DATE_TIME IS NOT NULL
                      AND C.CLOSED_DATE_TIME IS NULL
-                    THEN FMT_MIN(
-                        (L_NOW - C.REPORTED_DATE_TIME) * 1440
-                    )
+                    THEN FMT_MIN((L_NOW - C.REPORTED_DATE_TIME) * 1440)
                     ELSE '-'
-                END
-            );
+                END;
 
-            ADD_ROW(
-                'Complaint Date',
-                FMT_DT(C.COMPLAINT_DATE),
-                'Complaint ID',
-                TO_CHAR(C.COMPLAINT_ID)
-            );
+            ----------------------------------------------------------
+            -- CARD START
+            ----------------------------------------------------------
+            PUT('<section class="comp-card ' || L_PRIO_CSS || '">');
 
-              ADD_ROW(
-                'Fault Description',
-                C.FAULT_DESCRIPTION,
-                'Remarks',
-                C.REMARKS
-            );
+            -- Header
+            PUT('<header class="comp-head">');
+            PUT('<div class="comp-head-left">');
+            PUT('<span class="comp-eyebrow">Maintenance Complaint</span>');
+            PUT('<h3 class="comp-no">' || ESC(C.COMPLAINT_NO) || '</h3>');
+            PUT('<span class="comp-sub">Reported by <strong>' || ESC(C.REPORTED_BY) ||
+                '</strong> &middot; ' || ESC(FMT_DT(C.REPORTED_DATE_TIME)) || '</span>');
+            PUT('</div>');
 
-            -- L_HTML := L_HTML ||
-            --     '<div class="comp-description">' ||
-            --     '<div class="comp-label">Fault Description</div>' ||
-            --     '<div class="comp-desc-value">' ||
-            --     H(C.FAULT_DESCRIPTION) ||
-            --     '</div></div>';
+            PUT('<div class="comp-head-badges">');
+            PUT(BADGE(L_STATUS, L_STATUS_CSS));
+            IF L_OVERDUE THEN
+                PUT(BADGE('OVERDUE', 'badge-overdue'));
+            END IF;
+            IF NVL(C.REOPEN_COUNT, 0) > 0 THEN
+                PUT(BADGE('Reopened x' || TO_CHAR(C.REOPEN_COUNT), 'badge-warning'));
+            END IF;
+            IF C.EXCEPTIONAL_CLOSURE = 'Y' THEN
+                PUT(BADGE('Exceptional Closure', 'badge-warning'));
+            END IF;
+            PUT(BADGE(C.PRIORITY_NAME, 'badge-prio ' || L_PRIO_CSS));
+            PUT('</div>');
+            PUT('</header>');
 
-            IF C.REJECTION_REASON IS NOT NULL THEN
-                L_HTML := L_HTML ||
-                    '<div class="comp-description">' ||
-                    '<div class="comp-label">Rejection Reason</div>' ||
-                    '<div class="comp-desc-value">' ||
-                    H(C.REJECTION_REASON) ||
-                    '</div></div>';
+            -- KPI tiles
+            PUT('<div class="comp-tiles">');
+            PUT(TILE('Response Time',   L_RESPONSE));
+            PUT(TILE('Resolution Time', L_RESOLUTION));
+            PUT(TILE('Downtime',        L_DOWNTIME,
+                     CASE WHEN C.MACHINE_STOPPED = 'Y' THEN 'tile-alert' END));
+            IF C.PARTS_COUNT > 0 THEN
+                PUT(TILE('Total Parts Cost', FMT_NUM(C.TOTAL_COSTING)));
+            END IF;
+            PUT('</div>');
+
+            -- Timeline
+            PUT('<div class="comp-timeline">');
+            PUT(STEP('Submitted',     C.REPORTED_DATE_TIME));
+            PUT(STEP('Acknowledged',  C.ACKNOWLEDGED_DATE_TIME));
+            PUT(STEP('Start Working', C.RESOLVED_DATE_TIME));
+            PUT(STEP('Closed',        C.CLOSED_DATE_TIME));
+            PUT('</div>');
+
+            -- Body
+            PUT('<div class="comp-body">');
+
+            -- Section: Location & machine
+            PUT('<div class="comp-section">');
+            PUT('<h4 class="comp-section-title">Location &amp; Machine</h4>');
+            PUT('<div class="comp-grid">');
+            PUT(FIELD('Department',      C.DEPARTMENT_NAME));
+            PUT(FIELD('Production Line', C.LINE_NAME));
+            PUT(FIELD('Machine',         C.MACHINE_NAME, 'span-2'));
+            PUT('</div></div>');
+
+            -- Section: Change parts (from MS_CHANGE_PART, one row per part)
+            IF C.PARTS_COUNT > 0 THEN
+                PUT('<div class="comp-section">');
+                PUT('<h4 class="comp-section-title">Change Parts</h4>');
+                PUT('<div class="comp-table-wrap">');
+                PUT('<table class="comp-table">');
+                PUT('<thead><tr>' ||
+                    '<th>#</th>' ||
+                    '<th>Part</th>' ||
+                    '<th class="num">Qty</th>' ||
+                    '<th class="num">Unit Price</th>' ||
+                    '<th class="num">Total</th>' ||
+                    '</tr></thead><tbody>');
+
+                L_PART_NO := 0;
+                FOR P IN (
+                    SELECT MP.ID,
+                           MP.CHANGE_PART_ITEM_ID,
+                           MP.CHANGE_PARTS_NAME,
+                           MP.CHANGE_PARTS_PRICE,
+                           MP.CHANGE_PARTS_QTY
+                      FROM MS_CHANGE_PART MP
+                     WHERE MP.COMPLAINT_ID = C.COMPLAINT_ID
+                     ORDER BY MP.ID
+                )
+                LOOP
+                    L_PART_NO := L_PART_NO + 1;
+                    PUT('<tr>' ||
+                        '<td>' || TO_CHAR(L_PART_NO) || '</td>' ||
+                        '<td>' || ESC(P.CHANGE_PARTS_NAME) || '</td>' ||
+                        '<td class="num">' || ESC(FMT_NUM(P.CHANGE_PARTS_QTY)) || '</td>' ||
+                        '<td class="num">' || ESC(FMT_NUM(P.CHANGE_PARTS_PRICE)) || '</td>' ||
+                        '<td class="num">' ||
+                            ESC(FMT_NUM(NVL(P.CHANGE_PARTS_QTY, 0) * NVL(P.CHANGE_PARTS_PRICE, 0))) ||
+                        '</td>' ||
+
+                        '</tr>');
+                END LOOP;
+
+                PUT('</tbody><tfoot><tr>' ||
+                    '<td colspan="4" class="num"><strong>Total Costing</strong></td>' ||
+                    '<td class="num"><strong>' || ESC(FMT_NUM(C.TOTAL_COSTING)) || '</strong></td>' ||
+                    '<td colspan="2"></td>' ||
+                    '</tr></tfoot>');
+                PUT('</table></div></div>');
             END IF;
 
-            ADD_ROW(
-                'Created By',
-                C.CREATED_BY,
-                'Created Date',
-                FMT_DT(C.CREATED_DATE)
-            );
+            -- Section: Fault
+            PUT('<div class="comp-section">');
+            PUT('<h4 class="comp-section-title">Fault Details</h4>');
+            PUT('<div class="comp-grid">');
+            PUT(FIELD('Fault',    C.FAULT_NAME));
+            PUT(FIELD('Priority', C.PRIORITY_NAME));
+            PUT(FIELD('Production Impact', REPLACE(C.PRODUCTION_IMPACT, '_', ' ')));
+            PUT(FIELD('Machine Stopped',
+                      CASE C.MACHINE_STOPPED
+                          WHEN 'Y' THEN 'Yes'
+                          WHEN 'N' THEN 'No'
+                          ELSE '-'
+                      END));
+            PUT('</div>');
 
-            ADD_ROW(
-                'Updated By',
-                C.UPDATED_BY,
-                'Updated Date',
-                FMT_DT(C.UPDATED_DATE)
-            );
+            PUT('<div class="comp-note">' ||
+                '<span class="comp-label">Fault Description</span>' ||
+                '<p>' || ESC_BR(C.FAULT_DESCRIPTION) || '</p></div>');
 
-            L_HTML := L_HTML ||
-                '</div></section>';
+            IF C.REMARKS IS NOT NULL THEN
+                PUT('<div class="comp-note">' ||
+                    '<span class="comp-label">Remarks</span>' ||
+                    '<p>' || ESC_BR(C.REMARKS) || '</p></div>');
+            END IF;
+
+            IF C.REJECTION_REASON IS NOT NULL THEN
+                PUT('<div class="comp-note note-danger">' ||
+                    '<span class="comp-label">Rejection Reason</span>' ||
+                    '<p>' || ESC_BR(C.REJECTION_REASON) || '</p></div>');
+            END IF;
+            PUT('</div>');
+
+            PUT('</div>'); -- comp-body
+
+            -- Footer (audit)
+            PUT('<footer class="comp-foot">');
+            PUT('<span>Complaint ID: <strong>' || ESC(TO_CHAR(C.COMPLAINT_ID)) || '</strong></span>');
+            PUT('<span>Complaint Date: <strong>' || ESC(FMT_DT(C.COMPLAINT_DATE)) || '</strong></span>');
+            PUT('<span>Created: <strong>' || ESC(C.CREATED_BY) || '</strong> ' ||
+                ESC(FMT_DT(C.CREATED_DATE)) || '</span>');
+            PUT('<span>Updated: <strong>' || ESC(C.UPDATED_BY) || '</strong> ' ||
+                ESC(FMT_DT(C.UPDATED_DATE)) || '</span>');
+            PUT('</footer>');
+
+            PUT('</section>');
         END LOOP;
 
         IF L_COUNT = 0 THEN
-            L_HTML := L_HTML ||
-                '<div class="comp-card">' ||
-                '<div class="comp-title">Complaint</div>' ||
-                '<div class="comp-empty">' ||
-                'No complaint found.' ||
-                '</div></div>';
+            PUT('<section class="comp-card"><div class="comp-empty">' ||
+                'No complaint found.</div></section>');
         END IF;
 
-        L_HTML := L_HTML || '</div>';
+        PUT('</div>');
 
         RETURN L_HTML;
-
     END GET_COMPLAINT_CARD;
 
 END PKG_COMP_INFO;

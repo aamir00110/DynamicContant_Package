@@ -1,0 +1,1050 @@
+/*Using this package for dashboad for Complete application*/
+
+create or replace PACKAGE EM_HALLS_PKG AS
+
+    FUNCTION GET_DASHBOARD_HTML (
+        P_HALL_ID           IN NUMBER DEFAULT NULL,
+        P_MACHINE_ID        IN NUMBER DEFAULT NULL,
+        P_MACHINE_FAULT_ID  IN NUMBER DEFAULT NULL
+    ) RETURN CLOB;
+
+END EM_HALLS_PKG;
+/
+create or replace PACKAGE BODY EM_HALLS_PKG AS
+
+FUNCTION GET_DASHBOARD_HTML (
+    P_HALL_ID           IN NUMBER DEFAULT NULL,
+    P_MACHINE_ID        IN NUMBER DEFAULT NULL,
+    P_MACHINE_FAULT_ID  IN NUMBER DEFAULT NULL
+) RETURN CLOB
+IS
+    L_HTML              CLOB;
+    L_TOTAL             NUMBER := 0;
+    L_RESOLVED          NUMBER := 0;
+    L_PENDING           NUMBER := 0;
+    L_CANCELLED           NUMBER := 0;
+    L_PM_DUE            NUMBER := 0;
+    L_RUNNING           NUMBER := 0;
+    L_DOWN               NUMBER := 0;
+    L_MAINTENANCE       NUMBER := 0;
+    L_TOTAL_MACHINES    NUMBER := 0;
+
+    PROCEDURE ADD_HTML(P_TEXT IN VARCHAR2) IS
+    BEGIN
+        L_HTML := L_HTML || P_TEXT;
+    END;
+
+    FUNCTION E(P_VALUE IN VARCHAR2) RETURN VARCHAR2 IS
+    BEGIN
+        RETURN APEX_ESCAPE.HTML(P_VALUE);
+    END;
+
+    FUNCTION N(P_VALUE IN NUMBER) RETURN VARCHAR2 IS
+    BEGIN
+        RETURN TO_CHAR(NVL(P_VALUE,0),'FM999G999G999G990');
+    END;
+
+    FUNCTION ICON(P_TYPE IN VARCHAR2) RETURN VARCHAR2 IS
+        L_PATH VARCHAR2(2000);
+    BEGIN
+        L_PATH := CASE P_TYPE
+            WHEN 'COMPLAINT' THEN
+                '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>'
+            WHEN 'CHECK' THEN
+                '<path d="m5 12 4 4L19 6"/>'
+            WHEN 'CLOCK' THEN
+                '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>'
+            WHEN 'CALENDAR' THEN
+                '<rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>'
+            WHEN 'MACHINE' THEN
+                '<circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/>'
+            WHEN 'HALL' THEN
+                '<path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/>'
+            WHEN 'CANCEL' THEN
+                '<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6M9 9l6 6"/>'
+            WHEN 'PM' THEN
+                '<path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="10"/>'
+            WHEN 'PART' THEN
+                '<path d="m12 2 9 5-9 5-9-5 9-5z"/><path d="m3 12 9 5 9-5M3 17l9 5 9-5"/>'
+            ELSE
+                '<path d="M12 3v18M3 12h18"/>'
+        END;
+
+        RETURN
+            '<span class="eh-dash-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' ||
+            L_PATH || '</svg></span>';
+    END;
+
+    FUNCTION STATUS_BADGE(P_STATUS IN VARCHAR2) RETURN VARCHAR2 IS
+        L_CLASS VARCHAR2(30);
+    BEGIN
+        L_CLASS := CASE UPPER(NVL(P_STATUS,'UNKNOWN'))
+            WHEN 'CLOSED'       THEN 'green'
+            WHEN 'RESOLVED'     THEN 'green'
+            WHEN 'COMPLETED'    THEN 'green'
+            WHEN 'ACKNOWLEDGED' THEN 'blue'
+            WHEN 'IN PROGRESS'  THEN 'blue'
+            WHEN 'IN_PROGRESS'  THEN 'blue'
+            WHEN 'STARTED'      THEN 'blue'
+            WHEN 'PENDING'      THEN 'orange'
+            WHEN 'OPEN'         THEN 'orange'
+            WHEN 'CANCELLED'    THEN 'gray'
+            ELSE 'purple'
+        END;
+
+        RETURN '<span class="eh-status ' || L_CLASS || '">' ||
+               E(P_STATUS) || '</span>';
+    END;
+
+    ------------------------------------------------------------------
+    -- KPI CARD (P_PAGE given => whole card becomes a clickable link)
+    ------------------------------------------------------------------
+    FUNCTION KPI(
+        P_LABEL IN VARCHAR2,
+        P_VALUE IN NUMBER,
+        P_ICON  IN VARCHAR2,
+        P_CLASS IN VARCHAR2,
+        P_NOTE  IN VARCHAR2,
+        P_PAGE  IN NUMBER DEFAULT NULL
+    ) RETURN VARCHAR2 IS
+        L_CARD VARCHAR2(4000);
+        L_URL  VARCHAR2(4000);
+    BEGIN
+        L_CARD :=
+            '<div class="eh-kpi ' || P_CLASS ||
+            CASE WHEN P_PAGE IS NOT NULL THEN ' clickable' END || '">' ||
+                '<div class="eh-kpi-top">' ||
+                    ICON(P_ICON) ||
+                    '<span class="eh-kpi-note">' || E(P_NOTE) || '</span>' ||
+                '</div>' ||
+                '<div class="eh-kpi-value">' || N(P_VALUE) || '</div>' ||
+                '<div class="eh-kpi-label">' || E(P_LABEL) || '</div>' ||
+            '</div>';
+
+        IF P_PAGE IS NULL THEN
+            RETURN L_CARD;
+        END IF;
+
+        L_URL := APEX_PAGE.GET_URL(P_PAGE => P_PAGE);
+
+        RETURN
+            '<a class="eh-kpi-link" href="' ||
+            APEX_ESCAPE.HTML_ATTRIBUTE(L_URL) ||
+            '" title="Open ' || E(P_LABEL) || '">' ||
+            L_CARD ||
+            '</a>';
+    END;
+
+    FUNCTION MONEY(P_VALUE IN NUMBER) RETURN VARCHAR2 IS
+    BEGIN
+        RETURN TO_CHAR(
+            NVL(P_VALUE,0),
+            'FM999G999G999G990D00'
+        );
+    END;
+
+BEGIN
+
+    L_HTML := EMPTY_CLOB();
+
+    ------------------------------------------------------------------
+    -- 1. COMPLAINT KPI
+    ------------------------------------------------------------------
+
+    SELECT COUNT(*),
+           NVL(SUM(
+               CASE
+                   WHEN UPPER(STATUS_CODE) IN ('RESOLVED','CLOSED')
+                   THEN 1 ELSE 0
+               END
+           ),0),
+           NVL(SUM(
+               CASE
+                   WHEN STATUS_CODE = 'CANCELLED'
+                   THEN 1 ELSE 0
+               END
+           ),0),
+             NVL(SUM(
+               CASE
+                   WHEN STATUS_CODE = 'Submitted'
+                   THEN 1 ELSE 0
+               END
+           ),0)
+      INTO L_TOTAL,L_RESOLVED,L_CANCELLED,L_PENDING
+      FROM MS_COMPLAINT_H;
+
+    ------------------------------------------------------------------
+    -- 2. PM DUE
+    ------------------------------------------------------------------
+
+    SELECT COUNT(*)
+      INTO L_PM_DUE
+      FROM MS_PM_SCHEDULE
+     WHERE DUE_DATE >= TRUNC(SYSDATE)
+       AND DUE_DATE < TRUNC(SYSDATE)+8
+       AND UPPER(NVL(STATUS_CODE,'PENDING'))
+           NOT IN ('COMPLETED','CLOSED','CANCELLED');
+
+    ------------------------------------------------------------------
+    -- 3. MACHINE STATUS
+    ------------------------------------------------------------------
+
+---------------------------------------------------------------------
+    SELECT COUNT(*)
+      INTO L_TOTAL_MACHINES
+      FROM EM_MACHINES
+     WHERE ACTIVE_YN = 'Y';
+
+   SELECT COUNT(DISTINCT M.MACHINE_ID)
+      INTO L_DOWN
+      FROM EM_MACHINES M
+      JOIN MS_COMPLAINT_H C
+        ON C.MACHINE_ID = M.MACHINE_ID
+     WHERE M.ACTIVE_YN = 'Y'
+       AND C.MACHINE_STOPPED = 'Y'
+       AND C.STATUS_CODE ='Submitted';
+
+    SELECT COUNT(DISTINCT M.MACHINE_ID)
+      INTO L_MAINTENANCE
+      FROM EM_MACHINES M
+      JOIN MS_COMPLAINT_H C
+        ON C.MACHINE_ID = M.MACHINE_ID
+     WHERE M.ACTIVE_YN = 'Y'
+       AND C.STATUS_CODE IN ('ACKNOWLEDGED','IN PROGRESS')
+       AND TRUNC(C.CREATED_DATE)=TRUNC(SYSDATE);
+    --    AND NOT EXISTS (
+    --        SELECT 1
+    --          FROM MS_COMPLAINT_H C2
+    --         WHERE C2.MACHINE_ID = M.MACHINE_ID
+    --           AND C2.MACHINE_STOPPED = 'Y'
+    --           AND C.STATUS_CODE IN ('ACKNOWLEDGED','CLOSED','CANCELLED');
+    --    );
+
+    L_RUNNING := GREATEST(L_TOTAL_MACHINES-L_DOWN-L_MAINTENANCE,0 );
+    ------------------------------------------------------------------
+    -- 4. PREMIUM CSS
+    ------------------------------------------------------------------
+
+    ADD_HTML(q'~
+<style>
+.eh-dashboard{
+ --navy:#142b50;
+ --blue:#2563eb;
+ --purple:#8b5cf6;
+ --green:#10b981;
+ --orange:#f59e0b;
+ --red:#ef4444;
+ color:#172554;
+ padding:20px;
+ border-radius:24px;
+ background:
+ radial-gradient(circle at 5% 5%,#dbeafe 0,transparent 35%),
+ radial-gradient(circle at 95% 90%,#ede9fe 0,transparent 35%),
+ linear-gradient(140deg,#f8fbff,#eef3ff);
+ font-family:inherit;
+ box-sizing:border-box;
+}
+.eh-dashboard *{box-sizing:border-box}
+.eh-dash-header{
+ display:flex;align-items:center;justify-content:space-between;
+ flex-wrap:wrap;gap:15px;margin-bottom:24px;
+}
+.eh-brand{display:flex;align-items:center;gap:13px}
+.eh-brand-icon{
+ width:51px;height:51px;border-radius:16px;
+ display:grid;place-items:center;color:white;
+ background:linear-gradient(135deg,#2563eb,#7c3aed);
+ box-shadow:0 9px 20px #6366f155;
+ font-size:24px;font-weight:900;
+}
+.eh-brand h2{margin:0;font-size:22px;font-weight:850;color:#142b50}
+.eh-brand p{margin:4px 0 0;color:#64748b;font-size:12px}
+.eh-live{
+ display:flex;align-items:center;gap:8px;
+ padding:9px 14px;border-radius:30px;
+ background:#dcfce7;color:#047857;
+ font-size:11px;font-weight:800;
+}
+.eh-live:before{
+ content:"";width:8px;height:8px;border-radius:50%;
+ background:#10b981;box-shadow:0 0 0 4px #10b98122;
+}
+.eh-section-title{
+ display:flex;align-items:center;gap:10px;
+ margin:27px 0 14px;color:#172554;
+ font-size:15px;font-weight:850;
+}
+.eh-section-title:after{
+ content:"";height:1px;flex:1;
+ background:linear-gradient(90deg,#94a3b8,transparent);
+}
+
+/* ---------- KPI CARDS: one line + compact ---------- */
+.eh-kpi-grid{
+ display:grid;grid-template-columns:repeat(5,minmax(0,1fr));
+ gap:12px;
+}
+.eh-kpi{
+ --accent:#2563eb;--accent2:#6366f1;--accent-soft:#eff6ff;
+ position:relative;min-width:0;padding:15px 16px;border-radius:18px;
+ overflow:hidden;
+ border:1px solid #e6ecf8;
+ background:linear-gradient(160deg,#ffffff 55%,var(--accent-soft));
+ box-shadow:0 1px 2px #1e293b0a,0 10px 24px #1e40af12;
+ transition:transform .25s,box-shadow .25s,border-color .25s;
+}
+.eh-kpi:before{
+ content:"";position:absolute;left:0;top:0;right:0;height:3px;
+ background:linear-gradient(90deg,var(--accent),var(--accent2),transparent);
+}
+.eh-kpi:hover{transform:translateY(-4px);box-shadow:0 16px 32px #1e40af22}
+.eh-kpi.green{--accent:#10b981;--accent2:#059669;--accent-soft:#ecfdf5}
+.eh-kpi.orange{--accent:#f59e0b;--accent2:#f97316;--accent-soft:#fffbeb}
+.eh-kpi.purple{--accent:#a855f7;--accent2:#7c3aed;--accent-soft:#f5f3ff}
+.eh-kpi.red{--accent:#ef4444;--accent2:#f87171;--accent-soft:#fef2f2}
+.eh-kpi-link{
+ display:block;min-width:0;
+ text-decoration:none!important;color:inherit!important;
+ cursor:pointer;
+}
+.eh-kpi-link .eh-kpi{height:100%}
+.eh-kpi.clickable{cursor:pointer}
+.eh-kpi.clickable:hover{border-color:#2563eb55}
+.eh-kpi-top{display:flex;justify-content:space-between;align-items:center}
+.eh-dash-icon{
+ display:inline-grid;place-items:center;width:38px;height:38px;
+ border-radius:13px;color:#fff;
+ background:linear-gradient(135deg,var(--accent,#2563eb),var(--accent2,#6366f1));
+ box-shadow:0 7px 14px -5px var(--accent,#2563eb);
+}
+.eh-dash-icon svg{width:19px;height:19px}
+.eh-kpi-note{
+ font-size:9px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;
+ color:var(--accent,#2563eb);background:var(--accent-soft,#eff6ff);
+ padding:4px 9px;border-radius:20px;
+ white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:62%;
+}
+.eh-kpi-value{
+ font-size:29px;font-weight:900;color:#0f1f46;
+ margin-top:12px;line-height:1;letter-spacing:-.5px;
+}
+.eh-kpi-label{
+ font-size:12px;color:#475569;font-weight:700;margin-top:6px;
+ white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+
+.eh-layout{display:grid;grid-template-columns:1fr 1fr;gap:15px}
+.eh-panel{
+ min-width:0;padding:19px;border-radius:19px;
+ background:rgba(255,255,255,.85);
+ border:1px solid white;
+ box-shadow:0 9px 25px #1e40af12;
+ margin-bottom:15px;
+}
+.eh-panel h3{
+ display:flex;align-items:center;gap:9px;
+ margin:0 0 17px;font-size:15px;color:#172554;font-weight:850;
+}
+.eh-panel h3 span{color:#2563eb;font-size:19px}
+.eh-panel h3 .eh-ms-total{
+ margin-left:auto;font-style:normal;font-size:10px;font-weight:800;
+ color:#2563eb;background:#eff6ff;padding:4px 11px;border-radius:20px;
+}
+.eh-ms-body{display:flex;align-items:center;gap:24px;flex-wrap:wrap}
+.eh-donut{
+ position:relative;width:155px;height:155px;border-radius:50%;flex:0 0 auto;
+ box-shadow:0 12px 26px #1e40af1f;
+}
+.eh-donut-hole{
+ position:absolute;inset:19px;border-radius:50%;background:#fff;
+ display:flex;flex-direction:column;align-items:center;justify-content:center;
+ box-shadow:inset 0 2px 8px #1e293b14;
+}
+.eh-donut-hole strong{font-size:30px;font-weight:900;color:#0f1f46;line-height:1}
+.eh-donut-hole small{font-size:9px;font-weight:800;color:#64748b;letter-spacing:.9px;margin-top:5px}
+.eh-ms-legend{flex:1;min-width:180px;display:flex;flex-direction:column;gap:10px}
+.eh-ms-row{
+ display:flex;align-items:center;gap:10px;padding:11px 13px;
+ border-radius:14px;background:#f8fafc;border:1px solid #eef2f7;
+ transition:transform .2s,box-shadow .2s;
+}
+.eh-ms-row:hover{transform:translateX(4px);box-shadow:0 6px 14px #1e40af14}
+.eh-ms-row i{width:11px;height:11px;border-radius:50%;flex:0 0 auto;box-shadow:0 0 0 4px #ffffff}
+.eh-ms-row span{flex:1;font-size:12px;font-weight:750;color:#475569}
+.eh-ms-row b{font-size:18px;font-weight:900;color:#0f1f46}
+.eh-ms-row em{font-style:normal;font-size:10px;font-weight:800;color:#64748b;min-width:36px;text-align:right}
+.eh-progress-row{margin-top:15px}
+.eh-progress-label{
+ display:flex;justify-content:space-between;
+ font-size:11px;color:#64748b;font-weight:750;margin-bottom:6px;
+}
+.eh-progress{height:9px;border-radius:20px;background:#e2e8f0;overflow:hidden}
+.eh-progress span{display:block;height:100%;border-radius:20px}
+.eh-table-wrap{overflow-x:auto}
+.eh-table{
+ width:100%;border-collapse:collapse;font-size:11px;min-width:550px;
+}
+.eh-table th{
+ text-align:left;padding:12px 9px;background:#eff4ff;
+ color:#334155;font-weight:850;white-space:nowrap;
+}
+.eh-table td{
+ padding:12px 9px;border-bottom:1px solid #e8edf5;
+ color:#334155;vertical-align:middle;
+}
+.eh-table tr:hover td{background:#f8faff}
+.eh-status{
+ display:inline-block;padding:5px 10px;border-radius:20px;
+ font-size:10px;font-weight:850;white-space:nowrap;
+}
+.eh-status.green{background:#d1fae5;color:#047857}
+.eh-status.blue{background:#dbeafe;color:#1d4ed8}
+.eh-status.orange{background:#ffedd5;color:#c2410c}
+.eh-status.gray{background:#e2e8f0;color:#475569}
+.eh-status.purple{background:#ede9fe;color:#6d28d9}
+
+/* ---------- HALL / MACHINE / FAULT CARDS: compact ---------- */
+.eh-hall-grid{
+ display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;
+}
+.eh-card{
+ display:block;position:relative;min-width:0;
+ padding:13px 14px;border-radius:15px;text-decoration:none!important;
+ color:#fff!important;overflow:hidden;
+ background:linear-gradient(135deg,#183d70,#3159a4);
+ border:1px solid #ffffff35;
+ box-shadow:0 10px 23px #1e40af25;
+ transition:transform .25s,box-shadow .25s;
+}
+.eh-card:hover{
+ transform:translateY(-6px);
+ box-shadow:0 17px 30px #1e40af40;
+}
+.eh-card.machine{background:linear-gradient(135deg,#7139a7,#a34bba)}
+.eh-card.fault{background:linear-gradient(135deg,#b45309,#ea580c)}
+.eh-card-icon{font-size:20px;margin-bottom:6px}
+.eh-card-title{font-size:13px;font-weight:850;line-height:1.4}
+.eh-card-meta{font-size:10px;color:#e0e7ff;margin-top:7px;line-height:1.5}
+.eh-card-count{
+ display:inline-block;margin-top:8px;padding:4px 9px;
+ background:#ffffff24;border:1px solid #ffffff35;
+ border-radius:20px;font-size:10px;font-weight:850;
+}
+.eh-card-arrow{position:absolute;right:15px;bottom:16px;font-size:18px}
+.eh-empty{
+ padding:22px;text-align:center;border:1px dashed #cbd5e1;
+ border-radius:13px;color:#64748b;font-size:12px;
+}
+.eh-part-name{
+ max-width:250px;white-space:normal;line-height:1.5;
+ font-weight:700;color:#334155;
+}
+.eh-part-total{font-weight:900;color:#1d4ed8;white-space:nowrap}
+.eh-part-qty{font-weight:850;color:#047857}
+.eh-footer{
+ display:flex;justify-content:space-between;flex-wrap:wrap;
+ gap:8px;margin-top:22px;padding-top:14px;
+ border-top:1px solid #cbd5e1;color:#64748b;font-size:10px;
+}
+
+/* ---------- RESPONSIVE ---------- */
+@media(max-width:1100px){
+ .eh-kpi-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+@media(max-width:600px){
+ .eh-dashboard{padding:12px}
+ .eh-layout{grid-template-columns:1fr}
+ .eh-kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+ .eh-kpi{padding:10px}
+ .eh-kpi-value{font-size:20px}
+}
+</style>
+
+<div class="eh-dashboard">
+
+<div class="eh-dash-header">
+ <div class="eh-brand">
+  <div class="eh-brand-icon">M</div>
+  <div>
+   <h2>MMS Engineering</h2>
+   <p>MTML | Maintenance Management System</p>
+  </div>
+ </div>
+ <div class="eh-live">LIVE DATABASE DASHBOARD</div>
+</div>
+~');
+
+    ------------------------------------------------------------------
+    -- 5. KPI CARDS
+    ------------------------------------------------------------------
+
+    ADD_HTML('<div class="eh-kpi-grid">');
+
+    -- Total Complaints: click => opens Page 11
+    ADD_HTML(KPI('Total Complaints',L_TOTAL,'COMPLAINT','blue','ALL RECORDS',11));
+    ADD_HTML(KPI('Resolved Complaints',L_RESOLVED,'CHECK','green','RESOLVED + CLOSED',14));
+    ADD_HTML(KPI('Pending Complaints',L_PENDING,'CLOCK','orange','NOT CLOSED',13));
+    ADD_HTML(KPI('Cancelled',L_CANCELLED,'CANCEL','red','Cancelled',13));
+    ADD_HTML(KPI('PM Due This Week',L_PM_DUE,'CALENDAR','purple','NEXT 7 DAYS',11));
+
+    ADD_HTML('</div>');
+
+    ------------------------------------------------------------------
+    -- 6. MACHINE STATUS + HALL PERFORMANCE
+    ------------------------------------------------------------------
+
+    ADD_HTML(
+      '<div class="eh-section-title">Machine Status Overview</div>' ||
+      '<div class="eh-layout">' ||
+      '<div class="eh-panel">' ||
+      '<h3><span>◉</span> Machine Status<em class="eh-ms-total">' ||
+      N(L_TOTAL_MACHINES) || ' Total</em></h3>'
+    );
+
+    DECLARE
+        L_RUN_PCT NUMBER := 0;
+        L_DOWN_PCT NUMBER := 0;
+        L_MAINT_PCT NUMBER := 0;
+    BEGIN
+        IF L_TOTAL_MACHINES > 0 THEN
+            L_RUN_PCT := ROUND(L_RUNNING/L_TOTAL_MACHINES*100);
+            L_DOWN_PCT := ROUND(L_DOWN/L_TOTAL_MACHINES*100);
+            L_MAINT_PCT := ROUND(L_MAINTENANCE/L_TOTAL_MACHINES*100);
+        END IF;
+
+        ADD_HTML(
+          '<div class="eh-ms-body">' ||
+
+          -- Donut chart (cumulative conic-gradient)
+          '<div class="eh-donut" style="background:conic-gradient(' ||
+          '#10b981 0 ' || TO_CHAR(LEAST(L_RUN_PCT,100)) || '%,' ||
+          '#f59e0b ' || TO_CHAR(LEAST(L_RUN_PCT,100)) || '% ' ||
+                        TO_CHAR(LEAST(L_RUN_PCT+L_MAINT_PCT,100)) || '%,' ||
+          '#ef4444 ' || TO_CHAR(LEAST(L_RUN_PCT+L_MAINT_PCT,100)) || '% ' ||
+                        TO_CHAR(LEAST(L_RUN_PCT+L_MAINT_PCT+L_DOWN_PCT,100)) || '%,' ||
+          '#e2e8f0 ' || TO_CHAR(LEAST(L_RUN_PCT+L_MAINT_PCT+L_DOWN_PCT,100)) || '% 100%)">' ||
+          '<div class="eh-donut-hole"><strong>' || N(L_TOTAL_MACHINES) ||
+          '</strong><small>MACHINES</small></div></div>' ||
+
+          -- Legend
+          '<div class="eh-ms-legend">' ||
+
+          '<div class="eh-ms-row"><i style="background:#10b981"></i>' ||
+          '<span>Running</span><b>' || N(L_RUNNING) || '</b>' ||
+          '<em>' || N(L_RUN_PCT) || '%</em></div>' ||
+
+          '<div class="eh-ms-row"><i style="background:#f59e0b"></i>' ||
+          '<span>Maintenance</span><b>' || N(L_MAINTENANCE) || '</b>' ||
+          '<em>' || N(L_MAINT_PCT) || '%</em></div>' ||
+
+          '<div class="eh-ms-row"><i style="background:#ef4444"></i>' ||
+          '<span>Pending</span><b>' || N(L_DOWN) || '</b>' ||
+          '<em>' || N(L_DOWN_PCT) || '%</em></div>' ||
+
+          '</div></div>'
+        );
+    END;
+
+    ADD_HTML('</div>');
+
+    ADD_HTML('<div class="eh-panel"><h3><span>▥</span> Hall Performance</h3>');
+
+    DECLARE
+        L_FOUND BOOLEAN := FALSE;
+        L_MAX_COUNT NUMBER := 1;
+    BEGIN
+        SELECT GREATEST(NVL(MAX(MACHINE_COUNT),0),1)
+          INTO L_MAX_COUNT
+          FROM (
+              SELECT H.HALL_ID,COUNT(M.MACHINE_ID) MACHINE_COUNT
+                FROM EM_HALLS H
+                LEFT JOIN EM_MACHINES M
+                  ON M.HALL_ID = H.HALL_ID
+                 AND M.ACTIVE_YN = 'Y'
+               WHERE H.ACTIVE_YN = 'Y'
+               GROUP BY H.HALL_ID
+          );
+
+        FOR H IN (
+            SELECT H.HALL_NAME,COUNT(M.MACHINE_ID) MACHINE_COUNT
+              FROM EM_HALLS H
+              LEFT JOIN EM_MACHINES M
+                ON M.HALL_ID = H.HALL_ID
+               AND M.ACTIVE_YN = 'Y'
+             WHERE H.ACTIVE_YN = 'Y'
+             GROUP BY H.HALL_ID,H.HALL_NAME
+             ORDER BY H.HALL_NAME
+        )
+        LOOP
+            L_FOUND := TRUE;
+
+            ADD_HTML(
+              '<div class="eh-progress-row">' ||
+              '<div class="eh-progress-label"><span>' ||
+              E(H.HALL_NAME) || '</span><b>' ||
+              N(H.MACHINE_COUNT) || ' Machines</b></div>' ||
+              '<div class="eh-progress"><span style="width:' ||
+              TO_CHAR(ROUND(H.MACHINE_COUNT/L_MAX_COUNT*100)) ||
+              '%;background:linear-gradient(90deg,#2563eb,#8b5cf6)"></span></div>' ||
+              '</div>'
+            );
+        END LOOP;
+
+        IF NOT L_FOUND THEN
+            ADD_HTML('<div class="eh-empty">No active halls found.</div>');
+        END IF;
+    END;
+
+    ADD_HTML('</div></div>');
+
+     ------------------------------------------------------------------
+    -- 10. HALL SELECTION - ALWAYS VISIBLE
+    ------------------------------------------------------------------
+
+------------------------------------------------------------------
+-- 10. MACHINE STATUS OVERVIEW + HALL SELECTION
+------------------------------------------------------------------
+
+ADD_HTML(
+    '<div class="eh-section-title">Machine Status Overview</div>' ||
+    '<div class="eh-hall-grid">'
+);
+
+DECLARE
+    L_FOUND BOOLEAN := FALSE;
+BEGIN
+    FOR H IN (
+        SELECT HALL_ID, HALL_CODE, HALL_NAME
+          FROM EM_HALLS
+         WHERE ACTIVE_YN = 'Y'
+         ORDER BY HALL_NAME
+    )
+    LOOP
+        DECLARE
+            L_COUNT NUMBER;
+            L_URL   VARCHAR2(4000);
+        BEGIN
+            L_FOUND := TRUE;
+
+            SELECT COUNT(*)
+              INTO L_COUNT
+              FROM EM_MACHINES
+             WHERE HALL_ID = H.HALL_ID
+               AND ACTIVE_YN = 'Y';
+
+            L_URL := APEX_PAGE.GET_URL(
+                P_PAGE   => 3,
+                P_ITEMS  => 'P3_DEPARTMENT_ID',
+                P_VALUES => TO_CHAR(H.HALL_ID)
+            );
+
+            ADD_HTML(
+                '<a class="eh-card" href="' ||
+                APEX_ESCAPE.HTML_ATTRIBUTE(L_URL) || '">' ||
+
+                '<div class="eh-card-icon">🏭</div>' ||
+
+                '<div class="eh-card-title">' ||
+                E(H.HALL_NAME) ||
+                '</div>' ||
+
+                '<div class="eh-card-meta">Hall Code: ' ||
+                E(H.HALL_CODE) ||
+                '</div>' ||
+
+                '<span class="eh-card-count">' ||
+                N(L_COUNT) || ' MACHINES</span>' ||
+
+                '<span class="eh-card-arrow">→</span>' ||
+
+                '</a>'
+            );
+        END;
+    END LOOP;
+
+    IF NOT L_FOUND THEN
+        ADD_HTML(
+            '<div class="eh-empty">No active halls found.</div>'
+        );
+    END IF;
+END;
+
+ADD_HTML('</div>');
+
+    ------------------------------------------------------------------
+    -- 7. UPCOMING PM WORK ORDERS
+    ------------------------------------------------------------------
+
+    ADD_HTML(
+      '<div class="eh-section-title">Upcoming Preventive Maintenance</div>' ||
+      '<div class="eh-panel">' ||
+      '<h3><span>▦</span> Upcoming PM Schedule</h3>' ||
+      '<div class="eh-table-wrap"><table class="eh-table">' ||
+      '<thead><tr>' ||
+      '<th>Work Order</th><th>Machine ID</th><th>Target Date</th>' ||
+      '<th>Priority</th><th>Status</th>' ||
+      '</tr></thead><tbody>'
+    );
+
+    DECLARE
+        L_FOUND BOOLEAN := FALSE;
+    BEGIN
+        FOR W IN (
+            SELECT WORK_ORDER_NO,MACHINE_ID,TARGET_DATE,PRIORITY,STATUS_CODE
+              FROM MS_PM_WORK_ORDER
+             WHERE TARGET_DATE >= TRUNC(SYSDATE)
+               AND TARGET_DATE < TRUNC(SYSDATE)+8
+               AND UPPER(NVL(STATUS_CODE,'PENDING'))
+                   NOT IN ('COMPLETED','CLOSED','CANCELLED')
+             ORDER BY TARGET_DATE
+        )
+        LOOP
+            L_FOUND := TRUE;
+
+            ADD_HTML(
+              '<tr><td><b>' || E(W.WORK_ORDER_NO) || '</b></td>' ||
+              '<td>' || N(W.MACHINE_ID) || '</td>' ||
+              '<td>' || TO_CHAR(W.TARGET_DATE,'DD-MON-YYYY') || '</td>' ||
+              '<td>' || E(W.PRIORITY) || '</td>' ||
+              '<td>' || STATUS_BADGE(W.STATUS_CODE) || '</td></tr>'
+            );
+        END LOOP;
+
+        IF NOT L_FOUND THEN
+            ADD_HTML('<tr><td colspan="5">No upcoming PM work orders.</td></tr>');
+        END IF;
+    END;
+
+    ADD_HTML('</tbody></table></div></div>');
+
+    ------------------------------------------------------------------
+    -- 8. RECENT COMPLAINTS + CHANGE PARTS TOTAL
+    ------------------------------------------------------------------
+
+ADD_HTML(
+    '<div class="eh-section-title">Recent Complaints & Change Parts</div>' ||
+    '<div class="eh-panel">' ||
+    '<h3><span>▤</span> Complaint Wise Parts Summary</h3>' ||
+    '<div class="eh-table-wrap"><table class="eh-table">' ||
+    '<thead><tr>' ||
+    '<th>Complaint No</th>' ||
+    '<th>Machine Name</th>' ||
+    '<th>Fault Description</th>' ||
+    '<th>Status</th>' ||
+    '<th>Items</th>' ||
+    '<th>Total Qty</th>' ||
+    '<th>Total Parts Price</th>' ||
+    '</tr></thead><tbody>'
+);
+
+DECLARE
+    L_FOUND BOOLEAN := FALSE;
+BEGIN
+    FOR C IN (
+        SELECT
+            H.COMPLAINT_ID,
+            H.COMPLAINT_NO,
+            EM.MACHINE_NAME,
+            H.FAULT_DESCRIPTION,
+            H.STATUS_CODE,
+            H.COMPLAINT_DATE,
+            NVL(P.TOTAL_ITEMS, 0) TOTAL_ITEMS,
+            NVL(P.TOTAL_QTY, 0) TOTAL_QTY,
+            NVL(P.TOTAL_PRICE, 0) TOTAL_PRICE
+        FROM MS_COMPLAINT_H H
+        LEFT JOIN EM_MACHINES EM
+            ON EM.MACHINE_ID = H.MACHINE_ID
+        LEFT JOIN (
+            SELECT
+                COMPLAINT_ID,
+                COUNT(*) TOTAL_ITEMS,
+                SUM(NVL(CHANGE_PARTS_QTY, 0)) TOTAL_QTY,
+                SUM(
+                    NVL(CHANGE_PARTS_PRICE, 0) *
+                    NVL(CHANGE_PARTS_QTY, 0)
+                ) TOTAL_PRICE
+            FROM MS_CHANGE_PART
+            GROUP BY COMPLAINT_ID
+        ) P
+            ON P.COMPLAINT_ID = H.COMPLAINT_ID
+        WHERE TRUNC(H.CREATED_DATE) = TRUNC(SYSDATE)
+        --    AND TRUNC(H.CREATED_DATE) < TRUNC(SYSDATE) + 1
+        ORDER BY H.CREATED_DATE DESC NULLS LAST,
+                 H.COMPLAINT_ID DESC
+        FETCH FIRST 8 ROWS ONLY
+    )
+    LOOP
+        L_FOUND := TRUE;
+
+        ADD_HTML(
+            '<tr>' ||
+
+            '<td><b>' ||
+            E(C.COMPLAINT_NO) ||
+            '</b></td>' ||
+
+            '<td>' ||
+            E(NVL(C.MACHINE_NAME, 'N/A')) ||
+            '</td>' ||
+
+            '<td><div class="eh-part-name">' ||
+            E(SUBSTR(C.FAULT_DESCRIPTION, 1, 65)) ||
+            '</div></td>' ||
+
+            '<td>' ||
+            STATUS_BADGE(C.STATUS_CODE) ||
+            '</td>' ||
+
+            '<td>' ||
+            N(C.TOTAL_ITEMS) ||
+            '</td>' ||
+
+            '<td><span class="eh-part-qty">' ||
+            N(C.TOTAL_QTY) ||
+            '</span></td>' ||
+
+            '<td><span class="eh-part-total">' ||
+            MONEY(C.TOTAL_PRICE) ||
+            '</span></td>' ||
+
+            '</tr>'
+        );
+    END LOOP;
+
+    IF NOT L_FOUND THEN
+        ADD_HTML(
+            '<tr><td colspan="7">No complaints found today.</td></tr>'
+        );
+    END IF;
+END;
+
+ADD_HTML('</tbody></table></div></div>');
+
+
+    ------------------------------------------------------------------
+    -- 9. COMPLAINT WISE INDIVIDUAL CHANGE PART DETAILS
+    ------------------------------------------------------------------
+
+ADD_HTML(
+    '<div class="eh-section-title">Change Parts Details</div>' ||
+    '<div class="eh-panel">' ||
+    '<h3><span>◇</span> Individual Spare Parts Used</h3>' ||
+    '<div class="eh-table-wrap"><table class="eh-table">' ||
+    '<thead><tr>' ||
+    '<th>Complaint No</th>' ||
+    '<th>Part Item ID</th>' ||
+    '<th>Part Name</th>' ||
+    '<th>Quantity</th>' ||
+    '<th>Unit Price</th>' ||
+    '<th>Total Price</th>' ||
+    '<th>REMARKS</th>' ||
+    '</tr></thead><tbody>'
+);
+
+DECLARE
+    L_FOUND BOOLEAN := FALSE;
+BEGIN
+    FOR P IN (
+        SELECT
+            H.COMPLAINT_NO,
+            CP.COMPLAINT_ID,
+            CP.CHANGE_PART_ITEM_ID,
+            CP.CHANGE_PARTS_NAME,
+            CP.CHANGE_PARTS_PRICE,
+            CP.CHANGE_PARTS_QTY,
+            CP.REMARKS
+        FROM MS_CHANGE_PART CP
+        LEFT JOIN MS_COMPLAINT_H H  ON H.COMPLAINT_ID = CP.COMPLAINT_ID
+        WHERE TRUNC(H.CREATED_DATE) = TRUNC(SYSDATE)
+        ORDER BY CP.COMPLAINT_ID DESC, CP.ID DESC
+        FETCH FIRST 30 ROWS ONLY
+    )
+    LOOP
+        L_FOUND := TRUE;
+
+        ADD_HTML(
+            '<tr>' ||
+
+            '<td><b>' ||
+            E(NVL(P.COMPLAINT_NO, TO_CHAR(P.COMPLAINT_ID))) ||
+            '</b></td>' ||
+
+            '<td>' ||
+            N(P.CHANGE_PART_ITEM_ID) ||
+            '</td>' ||
+
+            '<td><div class="eh-part-name">' ||
+            E(NVL(P.CHANGE_PARTS_NAME,
+                'Item ID: ' || TO_CHAR(P.CHANGE_PART_ITEM_ID))) ||
+            '</div></td>' ||
+
+            '<td><span class="eh-part-qty">' ||
+            N(P.CHANGE_PARTS_QTY) ||
+            '</span></td>' ||
+
+            '<td>' ||
+            MONEY(P.CHANGE_PARTS_PRICE) ||
+            '</td>' ||
+
+            '<td><span class="eh-part-total">' ||
+            MONEY(
+                NVL(P.CHANGE_PARTS_PRICE, 0) *
+                NVL(P.CHANGE_PARTS_QTY, 0)
+            ) ||
+            '</span></td>' ||
+
+            '<td>' ||
+            E(P.REMARKS) ||
+            '</td>' ||
+
+            '</tr>'
+        );
+    END LOOP;
+
+    IF NOT L_FOUND THEN
+        ADD_HTML(
+            '<tr><td colspan="7">' ||
+            'No change parts records found.' ||
+            '</td></tr>'
+        );
+    END IF;
+END;
+
+ADD_HTML('</tbody></table></div></div>');
+
+    ------------------------------------------------------------------
+    -- 11. MACHINE SELECTION
+    ------------------------------------------------------------------
+
+    IF P_HALL_ID IS NOT NULL THEN
+
+        ADD_HTML('<div class="eh-section-title">Hall Machines</div>');
+        ADD_HTML('<div class="eh-hall-grid">');
+
+        DECLARE
+            L_FOUND BOOLEAN := FALSE;
+        BEGIN
+            FOR M IN (
+                SELECT MACHINE_ID,MACHINE_CODE,MACHINE_NAME,
+                       MODEL_NO,SERIAL_NO
+                  FROM EM_MACHINES
+                 WHERE HALL_ID = P_HALL_ID
+                   AND ACTIVE_YN = 'Y'
+                 ORDER BY MACHINE_NAME
+            )
+            LOOP
+                DECLARE
+                    L_URL VARCHAR2(4000);
+                BEGIN
+                    L_FOUND := TRUE;
+
+                    L_URL := APEX_PAGE.GET_URL(
+                        P_PAGE => 3,
+                        P_ITEMS => 'P3_DEPARTMENT_ID,P3_MACHINE_ID',
+                        P_VALUES => TO_CHAR(P_HALL_ID) || ',' ||
+                                    TO_CHAR(M.MACHINE_ID)
+                    );
+
+                    ADD_HTML(
+                      '<a class="eh-card machine" href="' ||
+                      APEX_ESCAPE.HTML_ATTRIBUTE(L_URL) || '">' ||
+                      '<div class="eh-card-icon">⚙</div>' ||
+                      '<div class="eh-card-title">' ||
+                      E(M.MACHINE_NAME) || '</div>' ||
+                      '<div class="eh-card-meta">Code: ' ||
+                      E(M.MACHINE_CODE) || '</div>' ||
+                      '<div class="eh-card-meta">Model: ' ||
+                      E(M.MODEL_NO) || '</div>' ||
+                      '<span class="eh-card-count">SELECT MACHINE</span>' ||
+                      '<span class="eh-card-arrow">→</span>' ||
+                      '</a>'
+                    );
+                END;
+            END LOOP;
+
+            IF NOT L_FOUND THEN
+                ADD_HTML('<div class="eh-empty">No machines found in this hall.</div>');
+            END IF;
+        END;
+
+        ADD_HTML('</div>');
+    END IF;
+
+    ------------------------------------------------------------------
+    -- 12. MACHINE FAULT SELECTION
+    ------------------------------------------------------------------
+
+    IF P_HALL_ID IS NOT NULL AND P_MACHINE_ID IS NOT NULL THEN
+
+        ADD_HTML('<div class="eh-section-title">Machine Faults</div>');
+        ADD_HTML('<div class="eh-hall-grid">');
+
+        DECLARE
+            L_FOUND BOOLEAN := FALSE;
+        BEGIN
+            FOR F IN (
+                SELECT MACHINE_FAULT_ID,FAULT_CODE,FAULT_NAME,
+                       SEVERITY,FAULT_DESCRIPTION
+                  FROM EM_MACHINE_FAULTS
+                 WHERE MACHINE_ID = P_MACHINE_ID
+                   AND ACTIVE_YN = 'Y'
+                 ORDER BY FAULT_NAME
+            )
+            LOOP
+                DECLARE
+                    L_URL VARCHAR2(4000);
+                BEGIN
+                    L_FOUND := TRUE;
+
+                    L_URL := APEX_PAGE.GET_URL(
+                        P_PAGE => 3,
+                        P_ITEMS =>
+                            'P3_DEPARTMENT_ID,P3_MACHINE_ID,P3_MACHINE_FAULT_ID',
+                        P_VALUES =>
+                            TO_CHAR(P_HALL_ID) || ',' ||
+                            TO_CHAR(P_MACHINE_ID) || ',' ||
+                            TO_CHAR(F.MACHINE_FAULT_ID)
+                    );
+
+                    ADD_HTML(
+                      '<a class="eh-card fault" href="' ||
+                      APEX_ESCAPE.HTML_ATTRIBUTE(L_URL) || '">' ||
+                      '<div class="eh-card-icon">⚠</div>' ||
+                      '<div class="eh-card-title">' ||
+                      E(F.FAULT_NAME) || '</div>' ||
+                      '<div class="eh-card-meta">Fault Code: ' ||
+                      E(F.FAULT_CODE) || '</div>' ||
+                      '<div class="eh-card-meta">Severity: ' ||
+                      E(F.SEVERITY) || '</div>' ||
+                      '<span class="eh-card-count">ISSUE COMPLAINT</span>' ||
+                      '<span class="eh-card-arrow">→</span>' ||
+                      '</a>'
+                    );
+                END;
+            END LOOP;
+
+            IF NOT L_FOUND THEN
+                ADD_HTML('<div class="eh-empty">No active faults found.</div>');
+            END IF;
+        END;
+
+        ADD_HTML('</div>');
+    END IF;
+
+    ------------------------------------------------------------------
+    -- 13. FOOTER
+    ------------------------------------------------------------------
+
+    ADD_HTML(
+      '<div class="eh-footer">' ||
+      '<span>● System Online | Oracle APEX</span>' ||
+      '<span>Master Textile Limited | MMS Engineering</span>' ||
+      '</div></div>'
+    );
+
+    RETURN L_HTML;
+
+END GET_DASHBOARD_HTML;
+
+END EM_HALLS_PKG;
+/
